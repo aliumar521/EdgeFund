@@ -1,0 +1,21 @@
+.env
+.env.local
+*.db
+*.db-wal
+*.db-shm
+data_store/
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+*.log
+runs/
+
+# reference repos, removed before publishing
+alpaca-risk-agent/
+ai-hedge-fund/
+TradingAgents/
+
+# private deploy runbook, contains secret handling notes
+DEPLOY_COOLIFY.md

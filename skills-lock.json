@@ -1,0 +1,59 @@
+{
+  "version": 1,
+  "skills": {
+    "alpaca-broker-market-data": {
+      "source": "alpacahq/alpaca-skills",
+      "sourceType": "github",
+      "skillPath": "skills/broker-api/market-data/SKILL.md",
+      "computedHash": "d69076f56693a3177c35b02c5893627a73a4d61e4f55aea0b74be7d287c079ea"
+    },
+    "alpaca-broker-rate-limits-resilience": {
+      "source": "alpacahq/alpaca-skills",
+      "sourceType": "github",
+      "skillPath": "skills/broker-api/rate-limits-resilience/SKILL.md",
+      "computedHash": "63b1ac506723f1e3b025fa73e388535569fc47bad0cd8b45c3f0befe5fc38f12"
+    },
+    "alpaca-broker-reconciliation-idempotency": {
+      "source": "alpacahq/alpaca-skills",
+      "sourceType": "github",
+      "skillPath": "skills/broker-api/reconciliation-idempotency/SKILL.md",
+      "computedHash": "e6577184ec74413409c44f7043d808966de3e9fc1190587fae167812a039fb7c"
+    },
+    "alpaca-broker-sse-events": {
+      "source": "alpacahq/alpaca-skills",
+      "sourceType": "github",
+      "skillPath": "skills/broker-api/sse-events/SKILL.md",
+      "computedHash": "362000dce3e69f41954c0767d7c1218b92dcd2bf7d712436eba13104a2a2ff2c"
+    },
+    "alpaca-broker-trading-orders": {
+      "source": "alpacahq/alpaca-skills",
+      "sourceType": "github",
+      "skillPath": "skills/broker-api/trading-orders/SKILL.md",
+      "computedHash": "f365405c6ede79cb02c466534f8f7d8cdcacc63bb3e58cc9366625402617404c"
+    },
+    "alpaca-trading-backtest": {
+      "source": "alpacahq/alpaca-skills",
+      "sourceType": "github",
+      "skillPath": "skills/trading-api/backtest/SKILL.md",
+      "computedHash": "47ac9355c38da95d4444c29358fa65d2c4e297e93a8f940327f52e03eac2a3c1"
+    },
+    "alpaca-trading-paper-trading": {
+      "source": "alpacahq/alpaca-skills",
+      "sourceType": "github",
+      "skillPath": "skills/trading-api/paper-trading/SKILL.md",
+      "computedHash": "8a9299d2db96ecf41d0987ca7d16584248374c263845fb0406b66dbb2b2075e3"
+    },
+    "alpaca-trading-paper-trading-cli": {
+      "source": "alpacahq/alpaca-skills",
+      "sourceType": "github",
+      "skillPath": "skills/trading-api/paper-trading-cli/SKILL.md",
+      "computedHash": "ed7400019605a896b8fce28fe4a9f2f0a9103518fb1695e1c3d9021770c819ff"
+    },
+    "alpaca-trading-paper-trading-mcp": {
+      "source": "alpacahq/alpaca-skills",
+      "sourceType": "github",
+      "skillPath": "skills/trading-api/paper-trading-mcp/SKILL.md",
+      "computedHash": "dfc0b701fc6267182e357ee46e0ee7b1b732261818cd70f17c080d6041ac3959"
+    }
+  }
+}

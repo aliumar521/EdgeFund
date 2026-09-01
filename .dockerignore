@@ -1,0 +1,15 @@
+.git
+.venv
+venv
+__pycache__
+*.pyc
+data_store
+tests
+.env
+.env.local
+*.log
+alpaca-risk-agent
+ai-hedge-fund
+TradingAgents
+.agents
+.claude
