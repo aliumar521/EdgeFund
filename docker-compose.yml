@@ -4,8 +4,15 @@ services:
   edgefund:
     build: .
     restart: unless-stopped
+    # The container always listens on 8000. Only the *host* side is
+    # configurable, because a busy Coolify box usually has 8000 taken already
+    # (Coolify's own proxy owns 80/443, and other stacks tend to grab 8000/8080).
+    # Set DASHBOARD_PORT to any free host port, or delete this ports: block
+    # entirely and route through Coolify's proxy with SERVICE_FQDN_EDGEFUND_8000.
     ports:
-      - "8000:8000"
+      - "${DASHBOARD_PORT:-8317}:8000"
+    expose:
+      - "8000"
     environment:
       ALPACA_API_KEY: ${ALPACA_API_KEY}
       ALPACA_SECRET_KEY: ${ALPACA_SECRET_KEY}

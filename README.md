@@ -131,8 +131,14 @@ uvicorn edgefund.dashboard.app:app --port 8000       # scheduler + dashboard
 ### Deploy
 
 ```bash
-docker compose up -d --build
+docker compose up -d --build                         # dashboard on :8317
+DASHBOARD_PORT=9000 docker compose up -d --build     # ...or any free host port
 ```
+
+The container always listens on `8000`; only the host side is configurable, so a
+host that already has `8000` claimed needs `DASHBOARD_PORT` set rather than an
+edit to the image. On Coolify you can drop the published port altogether and let
+its proxy route to the `expose`d container port via `SERVICE_FQDN_EDGEFUND_8000`.
 
 Secrets are injected at runtime (`ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`) and never committed. SQLite sits on a named volume so history survives redeploys.
 
