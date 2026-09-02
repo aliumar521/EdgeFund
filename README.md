@@ -57,7 +57,7 @@ Three tiers, and only the top one costs AI. That split is deliberate: **AI sets 
 │  → risk gate → sizing → mleg submission                          │
 └────────────────────────┬─────────────────────────────────────────┘
                          │ orders
-┌────────────────────────▼─── Tier 1: WATCHDOG — no AI, every 60s ─┐
+┌──────────────────▼─── Tier 1: WATCHDOG — no AI, 60s in session ──┐
 │  reconcile fills · profit target · stop · delta stop · expiry     │
 │  flatten · limit chase · circuit breakers                        │
 └──────────────────────────────────────────────────────────────────┘
@@ -156,7 +156,7 @@ edgefund/
   strategy/   payoff/EV engine · structure search · trading cycle
   risk/       pure sizing and limit functions
   execute/    mleg submission, limit chase, close, reconciliation
-  watchdog/   60-second position monitor
+  watchdog/   position monitor: 60s in session, 30min idle off-hours
   brain/      claude headless · directive · strategist · reflection
   dashboard/  FastAPI + single-page UI
   supervisor.py

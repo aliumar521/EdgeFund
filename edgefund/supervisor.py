@@ -1,10 +1,10 @@
 """Job scheduling for the whole agent.
 
-One process runs everything: the 60-second watchdog, the periodic scan/trade
-cycle, and the three daily brain calls. Cron was the obvious alternative but a
-single supervisor is a better fit here -- it works identically on Windows and in
-the container, holds one warm HTTP client, and keeps the scheduler's own state
-observable on the dashboard.
+One process runs everything: the watchdog (every 60s through the session, every
+30 minutes outside it), the periodic scan/trade cycle, and the three daily brain
+calls. Cron was the obvious alternative but a single supervisor is a better fit
+here -- it works identically on Windows and in the container, and keeps the
+scheduler's own state observable on the dashboard.
 
 Jobs are scheduled in UTC against explicit US/Eastern wall-clock times so that a
 container running in any timezone behaves the same.
@@ -17,7 +17,6 @@ from typing import Any
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-from apscheduler.triggers.interval import IntervalTrigger
 
 from edgefund.brain.reflect import run_reflection
 from edgefund.brain.strategist import run_strategist
@@ -45,6 +44,12 @@ RAMP_SCHEDULE: list[tuple[time, float]] = [
 FINAL_SWEEP_DATE = date(2026, 9, 4)
 FINAL_SWEEP_TIME = time(10, 15)
 
+# Watchdog runs at full cadence through the session plus the hour after the
+# close, where late fills and cancellations still land. Outside that window
+# options do not trade at all, so there is nothing to react to -- a slow idle
+# pass is enough to keep the equity mark and the dashboard heartbeat honest.
+WATCHDOG_ACTIVE_HOURS = (9, 16)     # inclusive, ET
+
 
 def current_ramp(now: datetime | None = None) -> float:
     """Size multiplier for right now."""
@@ -58,14 +63,25 @@ def current_ramp(now: datetime | None = None) -> float:
     return ramp
 
 
+def in_watchdog_window(now: datetime | None = None) -> bool:
+    """True when the watchdog should be running its full 60-second cadence."""
+    now = now or datetime.now(ET)
+    lo, hi = WATCHDOG_ACTIVE_HOURS
+    return now.weekday() < 5 and lo <= now.hour <= hi
+
+
 def _client() -> AlpacaClient:
     return AlpacaClient()
 
 
-def job_watchdog() -> None:
+def job_watchdog(idle: bool = False) -> None:
+    # The idle cron fires on :00/:30 around the clock, including inside the
+    # active window. Bail out there rather than doubling up on the 60s job.
+    if idle and in_watchdog_window():
+        return
     try:
         with _client() as client:
-            summary = run_watchdog(client)
+            summary = run_watchdog(client, idle=idle)
         if summary.get("closed"):
             log.info("watchdog closed %d position(s): %s",
                      summary["closed"], summary.get("actions"))
@@ -124,19 +140,28 @@ def build_scheduler() -> BackgroundScheduler:
         "misfire_grace_time": 45,
     })
 
-    # Watchdog: the only job that runs continuously. Extends past the close so
-    # late fills and cancellations get reconciled.
-    sched.add_job(job_watchdog, IntervalTrigger(seconds=60),
+    # Watchdog, full cadence: every minute of the session, extended an hour past
+    # the close so late fills and cancellations get reconciled.
+    sched.add_job(job_watchdog,
+                  CronTrigger(day_of_week="mon-fri", hour="9-16", minute="*",
+                              second=0, timezone=ET),
                   id="watchdog", name="position watchdog")
+    # Watchdog, idle: overnight and weekends nothing can be traded or exited, so
+    # a half-hourly pass is enough to keep the equity mark and heartbeat fresh.
+    # It self-skips inside the active window (see job_watchdog).
+    sched.add_job(job_watchdog,
+                  CronTrigger(minute="0,30", timezone=ET), kwargs={"idle": True},
+                  id="watchdog_idle", name="watchdog idle heartbeat")
 
-    # Scan/trade cycle. Skips the first minutes after the bell, where opening
-    # rotation makes quotes and greeks unreliable.
+    # Scan/trade cycle: every 30 minutes from 09:45 to 15:45 ET. The first 15
+    # minutes after the bell are skipped, where opening rotation makes quotes
+    # and greeks unreliable.
     sched.add_job(job_cycle,
                   CronTrigger(day_of_week="mon-fri", hour="9-15", minute="45",
                               timezone=ET),
                   id="cycle", name="scan and trade")
     sched.add_job(job_cycle,
-                  CronTrigger(day_of_week="mon-fri", hour="10-14", minute="15",
+                  CronTrigger(day_of_week="mon-fri", hour="10-15", minute="15",
                               timezone=ET),
                   id="cycle_mid", name="scan and trade (mid-hour)")
 

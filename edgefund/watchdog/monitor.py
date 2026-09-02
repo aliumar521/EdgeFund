@@ -1,4 +1,5 @@
-"""Position watchdog. Runs every ~60s during market hours. Uses no AI at all.
+"""Position watchdog. Every ~60s through the session, every 30 minutes outside
+it (an "idle" pass). Uses no AI at all.
 
 This is the component that has to be reliable, so it is deliberately the dumbest
 one: fixed thresholds, no model calls, no judgement. The AI layer can change
@@ -214,23 +215,31 @@ def chase_entry(client: AlpacaClient, strategy: dict[str, Any]) -> None:
         log.info("%s: reprice failed (%s)", uid, exc)
 
 
-def run_watchdog(client: AlpacaClient, dry_run: bool | None = None) -> dict[str, Any]:
-    """One watchdog pass. Safe to call when the market is closed."""
+def run_watchdog(client: AlpacaClient, dry_run: bool | None = None,
+                 idle: bool = False) -> dict[str, Any]:
+    """One watchdog pass. Safe to call when the market is closed.
+
+    `idle` is the off-hours mode: it still marks equity and writes a heartbeat,
+    which also proves the API credentials are alive, but skips reconciling every
+    strategy against the broker. Nothing can fill or be exited while the options
+    market is shut, so that per-strategy sweep is pure cost overnight.
+    """
     dry_run = SETTINGS.dry_run if dry_run is None else dry_run
     phase = market_phase(client)
     now = phase["now_et"]
 
     summary: dict[str, Any] = {
-        "market_open": phase["is_open"], "checked": 0,
+        "market_open": phase["is_open"], "idle": idle, "checked": 0,
         "closed": 0, "chased": 0, "actions": [],
     }
 
     account = client.account()
-    for strategy in db.active_strategies():
-        try:
-            sync_strategy_status(client, strategy)
-        except Exception as exc:
-            log.warning("%s: sync failed: %s", strategy["strategy_uid"], exc)
+    if not idle:
+        for strategy in db.active_strategies():
+            try:
+                sync_strategy_status(client, strategy)
+            except Exception as exc:
+                log.warning("%s: sync failed: %s", strategy["strategy_uid"], exc)
 
     strategies = db.active_strategies()
     state = state_from_account(account, strategies)
@@ -241,6 +250,18 @@ def run_watchdog(client: AlpacaClient, dry_run: bool | None = None) -> dict[str,
     summary["equity"] = state.equity
     summary["day_pnl_pct"] = state.day_pnl_pct
 
+    # Bail out before the kill switch, not after. day_pnl_pct does not reset
+    # until the next session, so a day that ends past the threshold would
+    # otherwise have us firing closing orders at a shut market every pass all
+    # night. Nothing can be flattened while options are not trading; the switch
+    # is evaluated on the first pass after the next open instead.
+    if not phase["is_open"]:
+        db.heartbeat("watchdog",
+                     f"{'idle' if idle else 'market closed'}; "
+                     f"{len(strategies)} tracked")
+        summary["actions"].append("market closed, no exits evaluated")
+        return summary
+
     # Kill switch outranks every other consideration.
     if breaches_kill_switch(state, SETTINGS.limits):
         db.log_decision("risk", "kill_switch",
@@ -250,11 +271,6 @@ def run_watchdog(client: AlpacaClient, dry_run: bool | None = None) -> dict[str,
                 close_spread(client, strategy, "kill switch", dry_run=dry_run)
                 summary["closed"] += 1
         summary["halted"] = "kill_switch"
-        return summary
-
-    if not phase["is_open"]:
-        db.heartbeat("watchdog", f"market closed; {len(strategies)} tracked")
-        summary["actions"].append("market closed, no exits evaluated")
         return summary
 
     for strategy in strategies:
