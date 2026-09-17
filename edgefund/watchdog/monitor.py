@@ -87,6 +87,24 @@ def current_close_cost(client: AlpacaClient, strategy: dict[str, Any]) -> float 
     return round(total, 4)
 
 
+def unrealised_pnl(strategy: dict[str, Any], close_cost: float) -> float:
+    """Mark-to-market P&L in dollars for one open structure.
+
+    Deliberately the same arithmetic as the realised figure in
+    `execute/router.py::sync_strategy_status`, with the live mid standing in for
+    the exit fill, so the marked and realised numbers are comparable rather than
+    two different measures of "profit".
+    """
+    entry = float(strategy.get("entry_fill_price")
+                  or abs(strategy.get("net_credit") or 0.0))
+    if entry <= 0:
+        return 0.0
+    qty = int(strategy.get("qty") or 0)
+    is_credit = float(strategy.get("net_credit") or 0.0) > 0
+    per_contract = (entry - close_cost) if is_credit else (-close_cost - entry)
+    return round(per_contract * 100 * qty, 2)
+
+
 def short_leg_deltas(client: AlpacaClient, strategy: dict[str, Any]) -> list[float]:
     legs = [lg for lg in (strategy.get("legs") or [])
             if lg["position_intent"] == "sell_to_open"]
@@ -243,12 +261,34 @@ def run_watchdog(client: AlpacaClient, dry_run: bool | None = None,
 
     strategies = db.active_strategies()
     state = state_from_account(account, strategies)
+
+    # Mark the book once, here, and reuse the quotes in the exit loop below.
+    # equity_curve.open_pnl was declared from the start and never written, so the
+    # dashboard's realised total (closed trades only) and its equity figure
+    # (which includes open marks) were never the same measure. Only priced while
+    # the market is actually open: the indicative feed goes stale after the bell
+    # and a mark against it is noise, not information.
+    marks: dict[str, float] = {}
+    if phase["is_open"] and not idle:
+        for strategy in strategies:
+            if strategy["status"] != "open":
+                continue
+            cost = current_close_cost(client, strategy)
+            if cost is not None:
+                marks[strategy["strategy_uid"]] = cost
+
+    open_pnl = round(
+        sum(unrealised_pnl(s, marks[s["strategy_uid"]])
+            for s in strategies if s["strategy_uid"] in marks), 2)
+
     db.record_equity(
         equity=state.equity, cash=float(account.get("cash") or 0),
-        options_bp=state.options_bp, day_pnl_pct=state.day_pnl_pct,
+        options_bp=state.options_bp, open_pnl=open_pnl,
+        day_pnl_pct=state.day_pnl_pct,
     )
     summary["equity"] = state.equity
     summary["day_pnl_pct"] = state.day_pnl_pct
+    summary["open_pnl"] = open_pnl
 
     # Bail out before the kill switch, not after. day_pnl_pct does not reset
     # until the next session, so a day that ends past the threshold would
@@ -284,7 +324,11 @@ def run_watchdog(client: AlpacaClient, dry_run: bool | None = None,
         if status != "open":
             continue
 
-        close_cost = current_close_cost(client, strategy)
+        # Priced above when the book was marked; fall back to a fresh quote only
+        # if that lookup failed, so a pass costs one quote call per structure.
+        close_cost = marks.get(strategy["strategy_uid"])
+        if close_cost is None:
+            close_cost = current_close_cost(client, strategy)
         if close_cost is None:
             continue
 
@@ -305,7 +349,18 @@ def run_watchdog(client: AlpacaClient, dry_run: bool | None = None,
 
 def flatten_all(client: AlpacaClient, reason: str,
                 dry_run: bool | None = None) -> int:
-    """Close every open structure. Used by the kill switch and the final sweep."""
+    """Close every open structure, cancelling unfilled entries on the way.
+
+    No scheduled caller: the competition final sweep was the last one, and the
+    kill switch closes positions inline in `run_watchdog` so it can halt on the
+    same pass. Kept as the manual panic button -- call it from a shell when the
+    book needs to go flat now:
+
+        from edgefund.data.alpaca import AlpacaClient
+        from edgefund.watchdog.monitor import flatten_all
+        with AlpacaClient() as c:
+            flatten_all(c, "manual flatten", dry_run=False)
+    """
     dry_run = SETTINGS.dry_run if dry_run is None else dry_run
     count = 0
     for strategy in db.active_strategies():

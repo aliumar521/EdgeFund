@@ -12,7 +12,7 @@ container running in any timezone behaves the same.
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, time
+from datetime import datetime
 from typing import Any
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -24,25 +24,9 @@ from edgefund.core import db
 from edgefund.core.config import SETTINGS
 from edgefund.data.alpaca import AlpacaClient
 from edgefund.strategy.cycle import run_cycle
-from edgefund.watchdog.monitor import ET, flatten_all, run_watchdog
+from edgefund.watchdog.monitor import ET, run_watchdog
 
 log = logging.getLogger("edgefund.supervisor")
-
-# Monday's ramp. The code will be hours old at the first bell, so the opening
-# trades are deliberately small: their job is to prove that mleg orders fill and
-# that exits fire, not to make money. Size scales up once that is observed.
-RAMP_SCHEDULE: list[tuple[time, float]] = [
-    (time(9, 30), 0.15),
-    (time(11, 0), 0.35),
-    (time(13, 0), 0.60),
-    (time(15, 0), 1.00),
-]
-
-# Competition deadline is Fri 2026-09-04 at 11:00 ET. Positions are flattened
-# before it so the submitted equity is realised P&L rather than a mark against
-# wide indicative quotes.
-FINAL_SWEEP_DATE = date(2026, 9, 4)
-FINAL_SWEEP_TIME = time(10, 15)
 
 # Watchdog runs at full cadence through the session plus the hour after the
 # close, where late fills and cancellations still land. Outside that window
@@ -52,15 +36,17 @@ WATCHDOG_ACTIVE_HOURS = (9, 16)     # inclusive, ET
 
 
 def current_ramp(now: datetime | None = None) -> float:
-    """Size multiplier for right now."""
-    now = now or datetime.now(ET)
-    if now.date() > date(2026, 8, 31):
-        return 1.0                      # ramp only applies to launch day
-    ramp = RAMP_SCHEDULE[0][1]
-    for start, value in RAMP_SCHEDULE:
-        if now.time() >= start:
-            ramp = value
-    return ramp
+    """Global size multiplier.
+
+    This was a launch-day ladder (0.15 -> 1.0 over the first session) whose job
+    was to prove that mleg orders fill and exits fire before committing real
+    size. That is long since observed, and the ladder had been returning a
+    constant 1.0 since 2026-09-01 regardless of `SIZE_RAMP`.
+
+    Kept as a function rather than inlined: it is the natural seam for a
+    drawdown-responsive throttle, and the dashboard already surfaces it.
+    """
+    return 1.0
 
 
 def in_watchdog_window(now: datetime | None = None) -> bool:
@@ -121,18 +107,6 @@ def job_reflection() -> None:
         log.exception("reflection job failed")
 
 
-def job_final_sweep() -> None:
-    """Realise everything before the submission deadline."""
-    if datetime.now(ET).date() != FINAL_SWEEP_DATE:
-        return
-    try:
-        with _client() as client:
-            closed = flatten_all(client, "final sweep before competition deadline")
-        log.info("final sweep closed %d structure(s)", closed)
-    except Exception:
-        log.exception("final sweep failed")
-
-
 def build_scheduler() -> BackgroundScheduler:
     sched = BackgroundScheduler(timezone=ET, job_defaults={
         "coalesce": True,          # a missed run is replaced, never queued up
@@ -175,12 +149,6 @@ def build_scheduler() -> BackgroundScheduler:
     sched.add_job(job_reflection, CronTrigger(day_of_week="mon-fri", hour=16, minute=15,
                                               timezone=ET),
                   id="brain_reflection", name="end of day reflection")
-
-    sched.add_job(job_final_sweep,
-                  CronTrigger(year=FINAL_SWEEP_DATE.year, month=FINAL_SWEEP_DATE.month,
-                              day=FINAL_SWEEP_DATE.day, hour=FINAL_SWEEP_TIME.hour,
-                              minute=FINAL_SWEEP_TIME.minute, timezone=ET),
-                  id="final_sweep", name="final sweep before deadline")
 
     return sched
 

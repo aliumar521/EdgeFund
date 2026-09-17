@@ -30,17 +30,32 @@ from edgefund.watchdog.monitor import ET
 
 log = logging.getLogger("edgefund.reflect")
 
-# The only parameters the reflection loop may move, with hard bounds.
+# The only parameters the reflection loop may move, with hard bounds. Every key
+# here MUST be read back through params.get() somewhere in the live path --
+# a knob that is tuned but never read is worse than no knob, because the model
+# records that it acted on a problem and nothing changes.
+#
+# `target_short_delta` used to sit here and was exactly that: the live structure
+# search in strategy/spreads.py ranks every strike combination by expected value
+# and never consults it (only scripts/debug_chain.py does). It absorbed 8 of the
+# ~20 adjustments made between 2026-09-03 and 09-16, all of them no-ops. Removed
+# rather than wired up -- delta-targeting is the heuristic the EV search replaced.
 TUNABLE: dict[str, tuple[float, float]] = {
     "min_edge_score": (0.30, 2.00),
-    "target_short_delta": (0.10, 0.35),
     "profit_target_pct": (0.30, 0.80),
     "stop_loss_mult": (1.30, 3.00),
     "delta_stop": (0.25, 0.50),
 }
 
 REFLECTION_PROMPT = """\
-You are reviewing EdgeFund's trading day now that outcomes are known.
+You are reviewing EdgeFund's trading now that outcomes are known.
+
+IMPORTANT -- what you are looking at: the trades below are a **rolling window of \
+the last {n_window} closed trades**, not just today's. {n_today} of them closed \
+today. Older trades reappear here every evening, so do not read a repeated \
+pattern as fresh evidence, and do not re-adjust a parameter you have already \
+adjusted for the same trades. If the window looks unchanged since your last \
+review, say so and propose no changes.
 
 EdgeFund sells defined-risk option spreads when implied volatility is rich \
 relative to realised volatility (vrp_ratio > 1), and buys debit spreads when it \
@@ -59,6 +74,12 @@ STILL OPEN
 Write a reflection that a future version of this agent can act on. Be specific \
 and cite numbers. Do not restate the P&L; explain what the signals got right or \
 wrong and what should change.
+
+If the honest conclusion is that the fix lies outside the tunable parameters -- \
+in how expected value, probability of profit or the exit rules are *computed* -- \
+say that plainly in the lessons rather than moving a knob that cannot address it. \
+A lesson naming an unreachable defect is more useful than a parameter nudge that \
+pretends to fix it.
 
 Reply with ONLY a JSON object:
 
@@ -139,9 +160,20 @@ def _stats_block(closed: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def apply_adjustments(proposed: dict[str, Any]) -> dict[str, float]:
-    """Clamp and persist proposed parameter changes. Returns what was applied."""
-    applied: dict[str, float] = {}
+def apply_adjustments(proposed: dict[str, Any]) -> dict[str, dict[str, float]]:
+    """Clamp and persist proposed parameter changes.
+
+    Returns `{key: {"from": old, "to": new}}`. Recording the previous value is
+    the point: `strategy_params` only ever holds the current one, so without it
+    a sequence like delta_stop 0.35 -> 0.40 -> 0.25 is invisible after the fact
+    and there is no way to see a knob oscillating on unchanged evidence.
+
+    A proposal that does not move the value is dropped rather than written, so
+    the audit trail carries real changes only.
+    """
+    from edgefund.core import params
+
+    applied: dict[str, dict[str, float]] = {}
     for key, raw in (proposed or {}).items():
         if key not in TUNABLE:
             log.info("ignoring proposed change to unknown/protected param %r", key)
@@ -154,9 +186,29 @@ def apply_adjustments(proposed: dict[str, Any]) -> dict[str, float]:
         clamped = max(lo, min(hi, value))
         if clamped != value:
             log.info("clamped %s from %s to %s", key, value, clamped)
+
+        previous = params.get(key)
+        try:
+            previous = float(previous) if previous is not None else None
+        except (TypeError, ValueError):
+            previous = None
+        if previous is not None and abs(previous - clamped) < 1e-9:
+            log.info("%s already at %s; no change written", key, clamped)
+            continue
+
         db.set_param(key, clamped, source="reflection")
-        applied[key] = clamped
+        applied[key] = {"from": previous, "to": clamped}
+        log.info("param %s: %s -> %s", key, previous, clamped)
+
+    if applied:
+        params.invalidate()          # make the new values live before the next pass
     return applied
+
+
+def _closed_today(closed: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Subset of `closed` that actually closed during today's ET session."""
+    today = datetime.now(ET).date().isoformat()
+    return [s for s in closed if str(s.get("ts_close") or "")[:10] == today]
 
 
 def run_reflection(client: AlpacaClient) -> dict[str, Any] | None:
@@ -171,11 +223,28 @@ def run_reflection(client: AlpacaClient) -> dict[str, Any] | None:
                         "no closed live trades yet")
         return None
 
+    # `closed_strategies` is a rolling last-60 window with no date filter, so it
+    # keeps returning the same trades on days when nothing closed. Reflecting on
+    # it anyway is not free: between 2026-09-04 and 09-16 this ran ten times on a
+    # byte-identical sample ({"trades": 60, "total_pnl": -218.0, "win_rate": 0.3})
+    # and moved parameters on nine of them -- including delta_stop 0.35 -> 0.40
+    # -> 0.25, drift driven entirely by sampling noise in the model's replies.
+    # No new outcomes means no new evidence; there is nothing to learn today.
+    today = _closed_today(closed)
+    if not today:
+        log.info("reflection skipped: nothing closed today (window unchanged)")
+        db.log_decision("brain", "reflection_skipped",
+                        f"no trades closed today; {len(closed)}-trade window "
+                        "unchanged since the last review")
+        return None
+
     if not claude_available():
         log.warning("claude unavailable; skipping reflection")
         return None
 
     prompt = REFLECTION_PROMPT.format(
+        n_window=len(closed),
+        n_today=len(today),
         stats_block=_stats_block(closed),
         trades_block=_trade_rows(closed[:25]),
         open_block=(
@@ -198,6 +267,7 @@ def run_reflection(client: AlpacaClient) -> dict[str, Any] | None:
                 if s.get("realized_pnl") is not None]
     stats = {
         "trades": len(realised),
+        "closed_today": len(today),
         "total_pnl": round(sum(realised), 2) if realised else 0.0,
         "win_rate": (round(sum(1 for p in realised if p > 0) / len(realised), 3)
                      if realised else None),

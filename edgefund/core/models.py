@@ -173,7 +173,12 @@ class StrategyDirective(BaseModel):
     @field_validator("max_dte")
     @classmethod
     def _dte(cls, v: int) -> int:
-        return int(max(0, min(7, v)))
+        # Floor of 1, not 0. pick_expiry() matches on `1 <= dte <= max_dte`, so
+        # max_dte=0 selects no expiry for any symbol and silently halts the fund
+        # -- it reads as a posture but is really an off switch. Standing down is
+        # what min_edge_score and aggression are for; this dial must stay
+        # tradable so a brain outage can never leave the book frozen.
+        return int(max(1, min(7, v)))
 
 
 class Decision(BaseModel):
